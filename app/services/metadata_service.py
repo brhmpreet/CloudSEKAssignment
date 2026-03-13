@@ -5,6 +5,7 @@ from app.exceptions import DuplicateURLError
 from app.repositories import metadata_repository as repo
 from app.services.http_client import fetch_url
 from app.schemas.metadata import MetadataResponse, MetadataAcceptedResponse
+from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ async def create_metadata(url):
         raise DuplicateURLError(f"Metadata record already exists for URL: {url}")
 
     data = await fetch_url(url)
-
+    now = datetime.now(timezone.utc)
     document = {
         "url": url,
         "headers": data["headers"],
@@ -38,13 +39,16 @@ async def create_metadata(url):
         "status_code": data["status_code"],
         "status": "collected",
         "error_message": None,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "created_at": now,
+        "updated_at": now,
     }
-    inserted_id = await repo.insert(document)
-    document["_id"] = inserted_id
-    return build_response(document)
 
+    try:
+        inserted_id = await repo.insert(document)
+        document["_id"] = inserted_id
+        return build_response(document)
+    except DuplicateKeyError:
+        raise DuplicateURLError(f"Metadata record already exists for URL: {url}")
 
 async def get_metadata(url):
 
@@ -55,6 +59,14 @@ async def get_metadata(url):
     
     if existing is not None and existing["status"] == "pending":
         return MetadataAcceptedResponse(url=url)
+
+    if existing is not None and existing["status"] == "failed":
+        if(await repo.update_status_by_url(url, "pending")):
+            asyncio.create_task(collect_in_background(url))
+            return MetadataAcceptedResponse(url=url, status="pending", message=f"retrying to collect metadata for URL: {url}")
+        else:
+            return MetadataAcceptedResponse(url=url, status="failed", message=f"failed to update status for URL: {url}")
+       
     
     was_inserted = await repo.insert_pending(url)
     if was_inserted:
@@ -83,5 +95,6 @@ async def collect_in_background(url):
         await repo.update_by_url(url, {
             "status": "failed",
             "error_message": str(error),
+            "updated_at": datetime.now(timezone.utc),
         })
     

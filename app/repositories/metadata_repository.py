@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from app.database.mongodb import get_database
+import logging
 
+logger = logging.getLogger(__name__)
 
 async def find_by_url(url):
     db = get_database()
@@ -39,3 +41,14 @@ async def insert_pending(url):
         return True
     except DuplicateKeyError:
         return False
+
+async def update_status_by_url(url, status):
+    try:
+        db = get_database()
+        now = datetime.now(timezone.utc)
+        await db.metadata.update_one({"url": url}, {"$set": {"status": status, "updated_at": now}})
+        return True
+    except PyMongoError as error:
+        logger.error("Failed to update status for URL: %s: %s", url, error)
+        return False
+        
